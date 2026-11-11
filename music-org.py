@@ -527,8 +527,7 @@ def write_plan(root: Path, plan, overwrite: bool = False):
         w.writerow([
             'old', 'new', 'reason', 'dup_group', 'dup_action', 'updated',
             'release_date', 'category', 'artist', 'song', 'album', 'genre',
-            'quality', 'has_cover', 'tag_count', 'copy_action',
-            'review_status', 'decision_reason',
+            'quality', 'has_cover', 'tag_count', 'copy_action', 'decision_reason',
         ])
         for e in plan:
             # dup_group and dup_action may be set later (or empty)
@@ -548,8 +547,7 @@ def write_plan(root: Path, plan, overwrite: bool = False):
                 e.get('category', ''), e.get('artist', ''), e.get('song', ''),
                 e.get('album', ''), e.get('genre', ''), e.get('quality', 'unknown'),
                 e.get('has_cover', 'no'), e.get('tag_count', 0),
-                e.get('copy_action', 'keep'), 'pending',
-                e.get('decision_reason', ''),
+                e.get('copy_action', 'keep'), e.get('decision_reason', ''),
             ])
     return out
 
