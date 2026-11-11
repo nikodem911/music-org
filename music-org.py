@@ -12,12 +12,14 @@ Rules applied (in order):
 - Avoid overwrites by appending ' (n)'
 
 The `plan` command writes a CSV manifest at <root>/plan.csv and does not change
-audio files. File operations are intentionally left for a later reviewed-copy step.
+audio files. The `apply` command reads that manifest and can either preview the
+planned changes or execute them in place with `--inplace`.
 """
 from pathlib import Path
 import argparse
 import re
 import csv
+import shutil
 from typing import Tuple, Optional
 
 try:
@@ -604,43 +606,152 @@ def read_plan_from_csv(plan_path: Path):
     return out
 
 
+def apply_plan(root: Path, manifest_path: Optional[Path] = None, inplace: bool = False, output_dir: Optional[Path] = None, show_progress: bool = True):
+    """Apply a previously written plan manifest.
+
+    When `inplace` is true, files are renamed or deleted directly in the input folder.
+    Otherwise, files are copied into `output_dir` (relative to the script directory when passed as a relative path).
+    """
+    manifest = Path(manifest_path) if manifest_path else root / PLAN_FILENAME
+    if not manifest.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest}")
+
+    plan = read_plan_from_csv(manifest)
+    if not plan:
+        return 0
+
+    performed = 0
+    for idx, entry in enumerate(plan, start=1):
+        old_path = Path(entry.get('old', '')).expanduser()
+        new_path = Path(entry.get('new', '')).expanduser()
+        action = str(entry.get('copy_action', 'keep')).strip().lower()
+
+        if not old_path or not str(old_path):
+            continue
+
+        if not old_path.exists():
+            if show_progress:
+                print(f"SKIP missing: {old_path}")
+            continue
+
+        if action == 'skip_duplicate':
+            if inplace:
+                old_path.unlink()
+                print(f"DELETED {old_path}")
+            else:
+                print(f"SKIP DUPLICATE {old_path}")
+            performed += 1
+            continue
+
+        if not inplace:
+            if output_dir is None:
+                raise ValueError('Output directory is required unless --inplace is used.')
+            target = Path(output_dir) / Path(new_path).name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and target.resolve() != old_path.resolve():
+                target = find_unique_target(target)
+            shutil.copy2(old_path, target)
+            performed += 1
+            if show_progress:
+                print(f"COPIED {old_path} -> {target}")
+            continue
+
+        if old_path == new_path:
+            continue
+
+        target = new_path
+        if target.exists() and target.resolve() != old_path.resolve():
+            target = find_unique_target(new_path)
+            print(f"TARGET EXISTS: using {target}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        old_path.rename(target)
+        performed += 1
+        if show_progress:
+            print(f"RENAMED {old_path} -> {target}")
+
+    return performed
+
+
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest='command', required=True)
+
     plan_parser = commands.add_parser('plan', help='Prepare a reviewable CSV manifest')
     plan_parser.add_argument('--root', required=True)
     plan_parser.add_argument('--no-progress', action='store_true', help='Disable per-file progress output')
     plan_parser.add_argument('--extensions', default=','.join(EXTENSIONS))
     plan_parser.add_argument('--overwrite-manifest', action='store_true', help='Replace an existing plan.csv')
+
+    apply_parser = commands.add_parser('apply', help='Apply a manifest to rename or delete files')
+    apply_parser.add_argument('--root', required=True)
+    apply_parser.add_argument('--manifest', default=None, help='Path to the plan CSV. Defaults to <root>/plan.csv')
+    apply_parser.add_argument('--inplace', action='store_true', help='Apply the plan directly to files in the input directory')
+    apply_parser.add_argument('--output', help='Destination directory for applied files, relative to the script directory')
+    apply_parser.add_argument('--no-progress', action='store_true', help='Disable per-file progress output')
+
     args = parser.parse_args()
 
     root = Path(args.root)
-    manifest_path = root / PLAN_FILENAME
-    if manifest_path.exists() and not args.overwrite_manifest:
-        parser.error(f"{manifest_path} already exists; review it or rerun with --overwrite-manifest")
-    exts = [e if e.startswith('.') else '.'+e for e in args.extensions.split(',')]
 
-    plan = build_plan(root, exts, show_progress=not args.no_progress)
-    plan = annotate_duplicates(plan)
+    if args.command == 'plan':
+        manifest_path = root / PLAN_FILENAME
+        if manifest_path.exists() and not args.overwrite_manifest:
+            parser.error(f"{manifest_path} already exists; review it or rerun with --overwrite-manifest")
+        exts = [e if e.startswith('.') else '.'+e for e in args.extensions.split(',')]
 
-    print(f"Manifest entries: {len(plan)}")
-    for e in plan:
-        dup = ''
-        if e.get('dup_group'):
-            dup = f" {e.get('dup_group')}:{e.get('dup_action')}"
-        category = f" category={e.get('category')}" if e.get('category') else ' category=REVIEW'
-        copy_action = e.get('copy_action', 'keep')
-        rd = ''
-        if e.get('release_date'):
-            rd = f" release_date={e.get('release_date')}"
-        upd = ''
-        if e.get('updated'):
-            upd = f" updated={e.get('updated')}"
-        print(f"{e['old']} -> {e.get('new','')} [{e.get('reason','')}]" + category + f" copy_action={copy_action}" + rd + upd + dup)
+        plan = build_plan(root, exts, show_progress=not args.no_progress)
+        plan = annotate_duplicates(plan)
 
-    plan_file = write_plan(root, plan, overwrite=args.overwrite_manifest)
-    print(f"Manifest written to: {plan_file}")
-    print('Manifest only: no audio files were changed.')
+        print(f"Manifest entries: {len(plan)}")
+        for e in plan:
+            dup = ''
+            if e.get('dup_group'):
+                dup = f" {e.get('dup_group')}:{e.get('dup_action')}"
+            category = f" category={e.get('category')}" if e.get('category') else ' category=REVIEW'
+            copy_action = e.get('copy_action', 'keep')
+            rd = ''
+            if e.get('release_date'):
+                rd = f" release_date={e.get('release_date')}"
+            upd = ''
+            if e.get('updated'):
+                upd = f" updated={e.get('updated')}"
+            print(f"{e['old']} -> {e.get('new','')} [{e.get('reason','')}]" + category + f" copy_action={copy_action}" + rd + upd + dup)
+
+        plan_file = write_plan(root, plan, overwrite=args.overwrite_manifest)
+        print(f"Manifest written to: {plan_file}")
+        print('Manifest only: no audio files were changed.')
+        return
+
+    if args.command == 'apply':
+        if not args.inplace and not args.output:
+            parser.error('Either --inplace or --output must be specified for apply.')
+
+        manifest_path = Path(args.manifest) if args.manifest else root / PLAN_FILENAME
+        if not manifest_path.exists():
+            parser.error(f"Manifest not found: {manifest_path}")
+
+        output_dir = None
+        if args.output:
+            output_dir = Path(args.output)
+            if not output_dir.is_absolute():
+                output_dir = Path(__file__).resolve().parent / output_dir
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        applied_count = apply_plan(
+            root=root,
+            manifest_path=manifest_path,
+            inplace=args.inplace,
+            output_dir=output_dir,
+            show_progress=not args.no_progress,
+        )
+        if args.inplace:
+            print(f"Applied {applied_count} plan entries in place.")
+        else:
+            print(f"Copied {applied_count} plan entries to {output_dir}.")
+        return
+
+    parser.error(f"Unsupported command: {args.command}")
 
 
 if __name__ == '__main__':
