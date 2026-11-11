@@ -84,21 +84,31 @@ SUFFIX_PATTERNS = [
     'music video',
     'video',
     'audio',
+    'radio edit',
+    'radio version',
+    'radio mix',
+    'single version',
+    'album version',
+    'extended version',
+    'remastered',
 ]
 
 
 def strip_common_suffixes(s: str) -> str:
     """Remove common trailing suffixes like '(Official Music Video)', '[Official Video]', ' - Official Audio', etc.
 
-    This strips repeated/various bracket and separator forms at the end of the string.
+    This strips repeated/various bracket and separator forms at the end of the string,
+    including radio edit/version and other common release variants.
     """
     orig = s
     changed = True
     while changed:
         changed = False
         for pat in SUFFIX_PATTERNS:
-            # match optional separators, optional opening bracket, the pattern, optional closing bracket, optional punctuation/whitespace at end
-            regex = re.compile(rf"(?i)\s*[-–—_:]*\s*(?:\(|\[)?\s*{re.escape(pat)}\s*(?:\)|\])?\s*\.?$")
+            # match trailing bracketed or separated suffixes in a wide variety of formats
+            regex = re.compile(
+                rf"(?i)\s*(?:[-–—_:]|\s+)?(?:\(|\[|\{{)?\s*{re.escape(pat)}\s*(?:\)|\]|\}})?\s*\.?$"
+            )
             new = regex.sub('', s).strip()
             if new != s:
                 s = new
@@ -520,10 +530,18 @@ def annotate_duplicates(plan):
     return plan
 
 
-def write_plan(root: Path, plan, overwrite: bool = False):
+def write_plan(root: Path, plan, overwrite: bool = False, skip_unchanged: bool = False):
     out = root / PLAN_FILENAME
     if out.exists() and not overwrite:
         raise FileExistsError(f"Manifest already exists: {out}. Pass overwrite=True to replace it.")
+
+    filtered_plan = plan
+    if skip_unchanged:
+        filtered_plan = [
+            e for e in plan
+            if str(e.get('updated', 'no')).lower() in ('yes', 'true') or e.get('copy_action', 'keep') == 'skip_duplicate'
+        ]
+
     with out.open('w', newline='') as fh:
         w = csv.writer(fh)
         w.writerow([
@@ -531,7 +549,7 @@ def write_plan(root: Path, plan, overwrite: bool = False):
             'release_date', 'category', 'artist', 'song', 'album', 'genre',
             'quality', 'has_cover', 'tag_count', 'copy_action', 'decision_reason',
         ])
-        for e in plan:
+        for e in filtered_plan:
             # dup_group and dup_action may be set later (or empty)
             dg = e.get('dup_group', '')
             da = e.get('dup_action', '')
@@ -682,6 +700,7 @@ def main():
     plan_parser.add_argument('--no-progress', action='store_true', help='Disable per-file progress output')
     plan_parser.add_argument('--extensions', default=','.join(EXTENSIONS))
     plan_parser.add_argument('--overwrite-manifest', action='store_true', help='Replace an existing plan.csv')
+    plan_parser.add_argument('--skip-unchanged', action='store_true', help='Skip printing unchanged files in the plan summary')
 
     apply_parser = commands.add_parser('apply', help='Apply a manifest to rename or delete files')
     apply_parser.add_argument('--root', required=True)
@@ -703,8 +722,12 @@ def main():
         plan = build_plan(root, exts, show_progress=not args.no_progress)
         plan = annotate_duplicates(plan)
 
+        filtered_plan = plan
+        if args.skip_unchanged:
+            filtered_plan = [e for e in plan if str(e.get('updated', 'no')).lower() in ('yes', 'true') or e.get('copy_action', 'keep') == 'skip_duplicate']
+
         print(f"Manifest entries: {len(plan)}")
-        for e in plan:
+        for e in filtered_plan:
             dup = ''
             if e.get('dup_group'):
                 dup = f" {e.get('dup_group')}:{e.get('dup_action')}"
@@ -718,7 +741,7 @@ def main():
                 upd = f" updated={e.get('updated')}"
             print(f"{e['old']} -> {e.get('new','')} [{e.get('reason','')}]" + category + f" copy_action={copy_action}" + rd + upd + dup)
 
-        plan_file = write_plan(root, plan, overwrite=args.overwrite_manifest)
+        plan_file = write_plan(root, plan, overwrite=args.overwrite_manifest, skip_unchanged=args.skip_unchanged)
         print(f"Manifest written to: {plan_file}")
         print('Manifest only: no audio files were changed.')
         return
